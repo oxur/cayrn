@@ -21,15 +21,15 @@ existing directory with mode 0700; Cayrn will reject a permissive directory
 rather than change its permissions.
 
 ```sh
-target/debug/cayrn serve-fixture \
+./bin/cayrn serve-fixture \
   --state-dir /tmp/cayrn-demo \
-  --worker target/debug/cayrn-fixture
+  --worker ./bin/cayrn-fixture
 ```
 
 In another terminal:
 
 ```sh
-target/debug/cayrn demo --state-dir /tmp/cayrn-demo
+./bin/cayrn demo --state-dir /tmp/cayrn-demo
 ```
 
 The demo opens two independent client connections, creates one session, adds 41
@@ -43,8 +43,8 @@ its session alive while the host/runtime remains healthy.
 `request` takes one JSON operation and writes one JSON response. For example:
 
 ```sh
-target/debug/cayrn request --state-dir /tmp/cayrn-demo '{"op":"describe"}'
-target/debug/cayrn request --state-dir /tmp/cayrn-demo '{"op":"create"}'
+./bin/cayrn request --state-dir /tmp/cayrn-demo '{"op":"describe"}'
+./bin/cayrn request --state-dir /tmp/cayrn-demo '{"op":"create"}'
 ```
 
 Use the returned `id` and `generation` in later submissions:
@@ -125,6 +125,17 @@ language-specific boundary while Rust retains common policy and durability.
 make help
 make check
 ```
+
+`make build` copies both `cayrn` and `cayrn-fixture` into `./bin` for easy access.
+Use `make build-release` (or `make build MODE=release`) for optimized binaries.
+`make format` and `make fmt` are aliases; `make lint` checks formatting and Clippy.
+`make clean` removes the two copied binaries, while `make clean-all` also clears
+Cargo build artifacts. Optional `make coverage` / `make coverage-html` require
+`cargo-llvm-cov` and the toolchain's `llvm-tools-preview` component;
+`make check-deps` requires `cargo-outdated`. `make deps` updates Cargo.lock within
+the existing manifest constraints. Set `NO_COLOR=1` for plain Make output.
+Help and build information show tracked edits as “uncommitted changes” and new
+files as “untracked files”, combining both labels when needed.
 
 Tests use actual Unix sockets, separate fixture processes and isolated temporary
 state directories. Checks include format, workspace tests, Clippy with warnings
