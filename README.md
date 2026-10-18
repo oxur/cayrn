@@ -1,11 +1,22 @@
-# Cayrn
+# cayrn
 
-Rust-powered infrastructure for language-agnostic REPLs, with persistent sessions,
-shared terminal and editor access, and durable, replayable transcripts.
+[![][build-badge]][build]
+[![][crate-badge]][crate]
+[![][tag-badge]][tag]
+[![][docs-badge]][docs]
+
+[![][logo]][logo-large]
+
+*Rust-powered infrastructure for language-agnostic REPLs, with persistent sessions,
+shared terminal and editor access, and durable, replayable transcripts*
 
 Cayrn is under development. It provides a local fixture session host and an
 experimental [native-agent connector with real LFE evaluation](docs/native-agent.md).
 Oxur, Lykn and Fennel integrations remain future work.
+
+For a hands-on walkthrough of the real LFE integration, use the
+[testing runbook](docs/testing-runbook.md), including checkout/branch locations,
+two-terminal sessions, reconnect/replay, interruption and close.
 
 ## Try the two-client demonstration
 
@@ -68,7 +79,8 @@ Read events from a cursor; each client tracks its own contiguous processed prefi
 
 Repeat using `data.next` until it equals `data.head`. A cursor is a **decimal
 string**, never a JSON floating-point number. Reads return a bounded ordered page
-of committed events; live follow/push subscriptions are not implemented yet.
+of committed events. Cursor-based `follow` is also implemented; a separate push
+subscription transport is not provided.
 Submitting returns a durably queued or previously recorded operation, not a
 promise that execution already finished. Admission can wait behind earlier work.
 
@@ -151,3 +163,20 @@ do not establish a remote CI result. There is no coverage percentage claim.
 Planning is maintained separately on the orphan `planning` branch/worktree.
 The current project is `project01-shared-repl-architecture`; the first execution
 slice is `arc01-session-demonstrator/slice01-durable-two-client-session`.
+
+## License
+
+Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+
+[//]: ---Named-Links---
+
+[logo]: assets/images/v1.1-y250.png
+[logo-large]: assets/images/v1.1-y1024.png
+[build]: https://github.com/oxur/cayrn/actions/workflows/ci.yml
+[build-badge]: https://github.com/oxur/cayrn/actions/workflows/ci.yml/badge.svg
+[crate]: https://crates.io/crates/cayrn
+[crate-badge]: https://img.shields.io/crates/v/cayrn.svg
+[docs]: https://docs.rs/cayrn/
+[docs-badge]: https://img.shields.io/badge/rust-documentation-blue.svg
+[tag-badge]: https://img.shields.io/github/tag/oxur/cayrn.svg
+[tag]: https://github.com/oxur/cayrn/tags
