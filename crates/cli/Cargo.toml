@@ -21,3 +21,27 @@ workspace = true
 [[bin]]
 name = "cayrn"
 path = "src/main.rs"
+
+# These features select external-runtime test targets, never production behavior.
+[features]
+native-integration = []
+xrepl-integration = ["native-integration", "dep:portable-pty"]
+
+[dependencies.portable-pty]
+version = "0.9"
+optional = true
+
+[dev-dependencies]
+tempfile.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+
+[[test]]
+name = "native_agent"
+path = "tests/native_agent.rs"
+required-features = ["native-integration"]
+
+[[test]]
+name = "xrepl"
+path = "tests/xrepl.rs"
+required-features = ["xrepl-integration"]

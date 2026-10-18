@@ -144,6 +144,13 @@ make help
 make check
 ```
 
+The ordinary `make test` / `make check` path needs no OTP runtime. Explicitly
+include the real LFE/xrepl integration tests with `make test-all`, or run only
+those tests with `make test-integration`. `make test-agent` selects only the
+host/BEAM target; `make test-xrepl` additionally runs native/consumer quality
+gates. See [integration tests](docs/integration-tests.md) for Cargo features,
+individual-test filters and checkout overrides.
+
 `make build` copies both `cayrn` and `cayrn-fixture` into `./bin` for easy access.
 Use `make build-release` (or `make build MODE=release`) for optimized binaries.
 `make format` and `make fmt` are aliases; `make lint` checks formatting and Clippy.

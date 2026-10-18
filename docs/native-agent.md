@@ -2,6 +2,9 @@
 
 Cayrn's shared Rust connector now supports the thin `cayrn-lfe` OTP application.
 It is an experimental real-language integration alongside the fixture backend.
+For checkout locations, startup commands and step-by-step checks, see the
+[testing runbook](testing-runbook.md).
+
 Other native agents can implement the same internal contract; no language-specific
 Rust crate or language switch is built into the connector.
 
@@ -22,8 +25,10 @@ in the main README. Clients disconnect independently of the agent connection.
 The host remains the sole admission/journal authority. The native project has
 no dependency on xrepl; xrepl is the first intended terminal consumer.
 
-`make test-agent CAYRN_LFE_DIR=/path/to/cayrn-lfe` runs real native tests plus
-host/BEAM integration. Ordinary `make check` still runs without OTP and retains
+`make test-agent CAYRN_LFE_DIR=/path/to/cayrn-lfe` builds the native agent and
+runs the Rust host/BEAM integration target. `make test-integration` adds the
+xrepl headless/PTY target; `make test-all` includes the ordinary workspace tests.
+See [integration-test commands](integration-tests.md) for features and filtering. Ordinary `make check` still runs without OTP and retains
 the fixture regression cases and non-LFE connector contract double.
 
 The agent contract is separately versioned from public client RPC. It uses the
@@ -66,7 +71,8 @@ persistent terminal cursors across process crashes are not yet implemented.
 
 `--cayrn-json` accepts source lines and emits session metadata/full JSON events
 for tools and automated tests. The ordinary default IF mock mode remains intact.
-`make test-xrepl` runs Rust consumer gates and real BEAM/host/headless/PTY cases.
+`make test-xrepl` retains the broader native/consumer quality gate around the
+Rust BEAM/host/headless/PTY tests.
 A headless second client is not a delivered editor plugin. Global terminal UX
 and richer language services remain separate work.
 

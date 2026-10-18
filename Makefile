@@ -43,9 +43,12 @@ help:
 	@printf '  %bmake build-release%b      - Build and copy optimized release binaries\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake build MODE=release%b - Equivalent release build\n' '$(YELLOW)' '$(RESET)'
 	@printf '\n%bTesting & Quality:%b\n' '$(GREEN)' '$(RESET)'
-	@printf '  %bmake test-xrepl%b         - Real shared LFE session and xrepl/PTY checks\n' '$(YELLOW)' '$(RESET)'
+	@printf '  %bmake test-xrepl%b         - Integration tests + native/xrepl quality gates\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake test-agent%b         - Real LFE/OTP integration (requires cayrn-lfe)\n' '$(YELLOW)' '$(RESET)'
-	@printf '  %bmake test%b               - Run all workspace test targets\n' '$(YELLOW)' '$(RESET)'
+	@printf '  %bmake test-integration%b   - Only real LFE + xrepl integration tests\n' '$(YELLOW)' '$(RESET)'
+	@printf '  %bmake test-all%b           - Workspace + real-runtime integration tests\n' '$(YELLOW)' '$(RESET)'
+	@printf '  %bmake lint-integration%b   - Compile/lint optional test targets (no OTP)\n' '$(YELLOW)' '$(RESET)'
+	@printf '  %bmake test%b               - OTP-free workspace tests\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake lint%b               - Check formatting and Clippy (warnings fail)\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake fmt-check%b          - Check Rust formatting without changes\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake format%b             - Format Rust sources (alias: make fmt)\n' '$(YELLOW)' '$(RESET)'
@@ -206,14 +209,33 @@ push:
 
 # Real BEAM integration is explicit; ordinary Rust checks need no OTP installation.
 CAYRN_LFE_DIR ?= ../../lfe/cayrn-lfe
-.PHONY: test-agent
-test-agent: build
-	$(MAKE) -C "$(CAYRN_LFE_DIR)" check
-	python3 scripts/test-native-agent.py --agent-dir "$(CAYRN_LFE_DIR)"
-
 XREPL_DIR ?= ../../lfe/xrepl/xrepl
-.PHONY: test-xrepl
-test-xrepl: build
+# Cargo's test-harness arguments, e.g. TEST_ARGS='host_crash --nocapture'.
+TEST_ARGS ?=
+.PHONY: test-agent test-xrepl test-integration test-all lint-integration
+
+# Build dependencies, but run only native-agent Rust integration tests.
+test-agent: build
+	$(MAKE) -C "$(CAYRN_LFE_DIR)" build
+	CAYRN_LFE_DIR="$(abspath $(CAYRN_LFE_DIR))" $(CARGO) test -p cayrn-cli \
+		--features native-integration --test native_agent --locked -- --test-threads=1 $(TEST_ARGS)
+
+# Only external-runtime integration tests; independent of workspace unit tests.
+test-integration: build
+	$(MAKE) -C "$(CAYRN_LFE_DIR)" build
+	$(MAKE) -C "$(XREPL_DIR)" CARGO_TARGET_DIR="$(abspath $(XREPL_DIR))/target" build-rust
+	CAYRN_LFE_DIR="$(abspath $(CAYRN_LFE_DIR))" \
+		XREPL_BIN="$(abspath $(XREPL_DIR))/target/debug/xrepl" \
+		$(CARGO) test -p cayrn-cli --features xrepl-integration \
+		--test native_agent --test xrepl --locked -- --test-threads=1 $(TEST_ARGS)
+
+test-all: test test-integration
+
+# Check optional Rust code even on machines without BEAM or sibling checkouts.
+lint-integration:
+	$(CARGO) clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+# Preserve the existing broader consumer gate used by the manual runbook.
+test-xrepl: test-integration lint-integration
 	$(MAKE) -C "$(CAYRN_LFE_DIR)" check
-	$(MAKE) -C "$(XREPL_DIR)" CARGO_TARGET_DIR="$(abspath $(XREPL_DIR))/target" build-rust lint-rust test-rust
-	python3 scripts/test-native-agent.py --agent-dir "$(CAYRN_LFE_DIR)" --xrepl "$(XREPL_DIR)/target/debug/xrepl"
+	$(MAKE) -C "$(XREPL_DIR)" CARGO_TARGET_DIR="$(abspath $(XREPL_DIR))/target" lint-rust test-rust
