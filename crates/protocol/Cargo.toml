@@ -1,0 +1,20 @@
+[package]
+name = "cayrn-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+[features]
+default = []
+wire = ["dep:tokio"]

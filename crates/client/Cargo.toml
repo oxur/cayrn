@@ -1,0 +1,16 @@
+[package]
+name = "cayrn-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+cayrn-protocol = { path = "../protocol", features = ["wire"] }
+tokio.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

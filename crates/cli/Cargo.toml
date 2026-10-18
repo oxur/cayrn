@@ -1,0 +1,23 @@
+[package]
+name = "cayrn-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+cayrn-protocol = { path = "../protocol", features = ["wire"] }
+cayrn-client = { path = "../client" }
+cayrn-host = { path = "../host" }
+tokio.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cayrn"
+path = "src/main.rs"
