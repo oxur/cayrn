@@ -109,6 +109,7 @@ impl Service {
                     "submit",
                     "inspect_operation",
                     "read",
+                    "follow",
                 ]
                 .map(str::to_owned)
                 .to_vec(),
@@ -225,6 +226,32 @@ impl Service {
                 Ok(Response::Operation(
                     self.journal.lookup(&session, &operation)?,
                 ))
+            }
+            Request::Follow {
+                session,
+                after,
+                limit,
+                wait_ms,
+            } => {
+                validate_id(&session)?;
+                if wait_ms > 1000 {
+                    return Err(Fault::new(
+                        ErrorCode::InvalidRequest,
+                        "follow wait exceeds 1000ms",
+                    ));
+                }
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_millis(u64::from(wait_ms));
+                loop {
+                    let page = self.journal.read(&session, after, limit)?;
+                    if !page.events.is_empty() || std::time::Instant::now() >= deadline {
+                        return Ok(Response::Events(page));
+                    }
+                    if self.stopping.load(Ordering::Acquire) {
+                        return Err(Fault::new(ErrorCode::Unavailable, "host is stopping"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
             Request::Read {
                 session,

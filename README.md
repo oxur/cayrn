@@ -102,7 +102,8 @@ This is an experimental Unix-only profile with a provisional JSON wire/schema.
 Frame parsing rejects malformed/oversized payloads. The private directory is the
 initial access boundary; there is no authenticated remote TCP service. Live
 follow, cancellation, program input, session close/archive/delete, production language
-adapters and Reedline are still future work. The native LFE prototype is described
+adapters and an interactive Cayrn CLI are still future work. The xrepl Rust
+terminal now offers an experimental Reedline consumer of native sessions. The native LFE prototype is described
 separately above. No checkpoints, automatic failover,
 production readiness or power-loss certification is claimed. Records remain
 local and are not pruned automatically; choose your state-directory location.

@@ -11,6 +11,8 @@ publish = false
 cayrn-protocol = { path = "../protocol", features = ["wire"] }
 tokio.workspace = true
 uuid.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

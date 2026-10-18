@@ -209,3 +209,10 @@ CAYRN_LFE_DIR ?= ../../lfe/cayrn-lfe
 test-agent: build
 	$(MAKE) -C "$(CAYRN_LFE_DIR)" check
 	python3 scripts/test-native-agent.py --agent-dir "$(CAYRN_LFE_DIR)"
+
+XREPL_DIR ?= ../../lfe/xrepl/xrepl
+.PHONY: test-xrepl
+test-xrepl: build
+	$(MAKE) -C "$(CAYRN_LFE_DIR)" check
+	$(MAKE) -C "$(XREPL_DIR)" CARGO_TARGET_DIR="$(abspath $(XREPL_DIR))/target" build-rust lint-rust test-rust
+	python3 scripts/test-native-agent.py --agent-dir "$(CAYRN_LFE_DIR)" --xrepl "$(XREPL_DIR)/target/debug/xrepl"

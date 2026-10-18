@@ -87,6 +87,8 @@ name = "cayrn-client"
 version = "0.1.0"
 dependencies = [
  "cayrn-protocol",
+ "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
 ]

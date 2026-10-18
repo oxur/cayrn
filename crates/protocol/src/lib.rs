@@ -209,6 +209,13 @@ pub enum Request {
         session: String,
         operation: String,
     },
+    /// Wait up to wait_ms (maximum 1000) for a bounded committed page.
+    Follow {
+        session: String,
+        after: Cursor,
+        limit: u16,
+        wait_ms: u16,
+    },
     Read {
         session: String,
         after: Cursor,

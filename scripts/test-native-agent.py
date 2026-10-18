@@ -5,6 +5,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import concurrent.futures
+import pty
+import select
+import fcntl
+import termios
 import socket
 import struct
 import subprocess
@@ -14,6 +19,7 @@ import uuid
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--agent-dir', type=Path, required=True)
+parser.add_argument('--xrepl', type=Path)
 args = parser.parse_args()
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -189,6 +195,71 @@ with tempfile.TemporaryDirectory(prefix='cayrn-native-', dir='/private/tmp') as 
             else:
                 raise AssertionError('slow evaluation failed to complete')
             print('PASS: busy native evaluator leaves peer context and inspection responsive', flush=True)
+            delayed, _ = evaluate('(progn (spawn (lambda () (timer:sleep 150) (io:format "LATE-ORIGIN" ()))) (quote scheduled))', client=reconnect)
+            following, _ = evaluate('(timer:sleep 400)', client=reconnect)
+            late_events = transcript(reconnect)
+            late = next(e for e in late_events if e['event'].get('text') == 'LATE-ORIGIN')
+            assert late['event']['operation'] == delayed['operation']
+            assert int(late['sequence']) < int(next(e['sequence'] for e in late_events if e['event'].get('kind') == 'outcome' and e['event'].get('operation') == following['operation']))
+            observer = Client(state / 'cayrn.sock')
+            after = late_events[-1]['sequence']
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                waiting = pool.submit(observer.call, op='follow', session=session['id'], after=after, limit=64, wait_ms=1000)
+                evaluate('(+ cayrn-probe 1)', client=reconnect)
+                follow_page = waiting.result(timeout=4)['data']
+                assert int(follow_page['events'][0]['sequence']) == int(after) + 1
+            observer.close()
+            print('PASS: replay/follow arrival and late output preserve contiguous cursors and original operation identity', flush=True)
+            if args.xrepl:
+                binary = str(args.xrepl.resolve())
+                head = transcript(reconnect)[-1]['sequence']
+                run = subprocess.run([binary, '--cayrn', str(state), '--session', session['id'], '--after', head, '--cayrn-json'], input='cayrn-probe\n', text=True, capture_output=True, timeout=8)
+                assert run.returncode == 0, run.stderr
+                records = [json.loads(line) for line in run.stdout.splitlines()]
+                assert records[0]['session'] == session['id']
+                assert any(e.get('event', {}).get('value') == '43' for e in records)
+                sequences = [int(e['sequence']) for e in records if 'sequence' in e]
+                assert sequences == list(range(int(head) + 1, int(head) + 1 + len(sequences)))
+                master, slave = pty.openpty()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 120, 0, 0))
+                interactive = subprocess.Popen([binary, '--cayrn', str(state), '--session', session['id'], '--after', transcript(reconnect)[-1]['sequence']], stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ, TERM='xterm-256color'))
+                os.close(slave)
+                screen = b''
+                def collect(seconds):
+                    output = b''
+                    deadline = time.monotonic() + seconds
+                    while time.monotonic() < deadline:
+                        readable, _, _ = select.select([master], [], [], max(0, deadline - time.monotonic()))
+                        if not readable:
+                            break
+                        try:
+                            chunk = os.read(master, 65536)
+                        except OSError:
+                            break
+                        output += chunk
+                        if b'\x1b[6n' in chunk:
+                            os.write(master, b'\x1b[1;1R')
+                    return output
+                try:
+                    screen += collect(.8)
+                    os.write(master, b'(+ cayrn-probe ')
+                    screen += collect(.2)
+                    evaluate('(progn (io:format "EDIT-BUFFER" ()) 0)', client=reconnect)
+                    during = collect(.3)
+                    assert b'EDIT-BUFFER' not in during, during
+                    os.write(master, b'1)\r')
+                    screen += during + collect(1.2)
+                    assert b'EDIT-BUFFER' in screen and b'Succeeded] 44' in screen, screen
+                    assert any(e['event'].get('submission', {}).get('source') == '(+ cayrn-probe 1)' for e in transcript(reconnect))
+                    os.write(master, b':quit\r')
+                    screen += collect(.5)
+                    interactive.wait(timeout=4)
+                    assert interactive.returncode == 0, screen
+                    assert evaluate('cayrn-probe', client=reconnect)[1]['value'] == '43'
+                finally:
+                    stop(interactive)
+                    os.close(master)
+                print('PASS: actual xrepl binary shares session; PTY draft survives remote output; EOF/quit only detaches', flush=True)
             print('PASS: real LFE bindings, two clients, lost reply dedup/conflict, Unicode/errors/input and last-client reconnect', flush=True)
             # Agent connection is separate from public client connections.
             stop(host, signal.SIGINT)

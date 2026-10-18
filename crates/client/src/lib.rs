@@ -41,3 +41,30 @@ impl Client {
         }
     }
 }
+
+mod spool;
+pub use spool::EventSpool;
+
+impl Client {
+    /// Read the next committed page without a replay/live subscription race.
+    /// Use a separate Client for submission while this bounded wait is pending.
+    pub async fn follow(
+        &mut self,
+        session: &str,
+        after: cayrn_protocol::Cursor,
+        wait_ms: u16,
+    ) -> Result<cayrn_protocol::Page> {
+        match self
+            .request(Request::Follow {
+                session: session.into(),
+                after,
+                limit: cayrn_protocol::MAX_PAGE,
+                wait_ms,
+            })
+            .await?
+        {
+            Response::Events(page) => Ok(page),
+            _ => Err(Fault::new(ErrorCode::Protocol, "expected event page")),
+        }
+    }
+}
