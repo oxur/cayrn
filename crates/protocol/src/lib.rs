@@ -253,6 +253,54 @@ pub enum WorkerFrame {
     Error(String),
 }
 
+/// Internal native-agent protocol, independently versioned from client RPC.
+pub mod agent {
+    use super::{Cursor, Phase};
+    use serde::{Deserialize, Serialize};
+    /// Current experimental native-agent version.
+    pub const VERSION: u16 = 1;
+    /// Host-to-agent control and execution; no evaluated-language fields.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum Command {
+        Hello {
+            version: u16,
+            session: String,
+            generation: String,
+            authority: String,
+        },
+        Dispatch {
+            operation: String,
+            source: String,
+            generation: String,
+            authority: String,
+        },
+        Ack {
+            position: Cursor,
+        },
+        Stop,
+    }
+    /// Agent-to-host capture and outcomes. Position is a connection-local exact cursor.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub enum Event {
+        Ready {
+            version: u16,
+            backend: String,
+        },
+        Output {
+            operation: String,
+            position: Cursor,
+            text: String,
+        },
+        Outcome {
+            operation: String,
+            phase: Phase,
+            value: String,
+        },
+    }
+}
+
 /// Shared, single-layer bounded JSON transport framing.
 #[cfg(feature = "wire")]
 pub mod wire {

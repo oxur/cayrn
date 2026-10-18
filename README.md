@@ -3,8 +3,9 @@
 Rust-powered infrastructure for language-agnostic REPLs, with persistent sessions,
 shared terminal and editor access, and durable, replayable transcripts.
 
-Cayrn is under development. The first runnable increment is a **local fixture
-session host**, not an evaluator for Oxur, LFE, Lykn or Fennel yet.
+Cayrn is under development. It provides a local fixture session host and an
+experimental [native-agent connector with real LFE evaluation](docs/native-agent.md).
+Oxur, Lykn and Fennel integrations remain future work.
 
 ## Try the two-client demonstration
 
@@ -100,8 +101,9 @@ runtime loss. The worker protocol is internal fixture infrastructure.
 This is an experimental Unix-only profile with a provisional JSON wire/schema.
 Frame parsing rejects malformed/oversized payloads. The private directory is the
 initial access boundary; there is no authenticated remote TCP service. Live
-follow, cancellation, program input, session close/archive/delete, real language
-adapters and Reedline are still future work. No checkpoints, automatic failover,
+follow, cancellation, program input, session close/archive/delete, production language
+adapters and Reedline are still future work. The native LFE prototype is described
+separately above. No checkpoints, automatic failover,
 production readiness or power-loss certification is claimed. Records remain
 local and are not pruned automatically; choose your state-directory location.
 

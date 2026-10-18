@@ -43,6 +43,7 @@ help:
 	@printf '  %bmake build-release%b      - Build and copy optimized release binaries\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake build MODE=release%b - Equivalent release build\n' '$(YELLOW)' '$(RESET)'
 	@printf '\n%bTesting & Quality:%b\n' '$(GREEN)' '$(RESET)'
+	@printf '  %bmake test-agent%b         - Real LFE/OTP integration (requires cayrn-lfe)\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake test%b               - Run all workspace test targets\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake lint%b               - Check formatting and Clippy (warnings fail)\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake fmt-check%b          - Check Rust formatting without changes\n' '$(YELLOW)' '$(RESET)'
@@ -201,3 +202,10 @@ push:
 	git push --atomic origin main planning --tags
 
 # Publishing is intentionally absent: all current workspace packages set publish = false.
+
+# Real BEAM integration is explicit; ordinary Rust checks need no OTP installation.
+CAYRN_LFE_DIR ?= ../../lfe/cayrn-lfe
+.PHONY: test-agent
+test-agent: build
+	$(MAKE) -C "$(CAYRN_LFE_DIR)" check
+	python3 scripts/test-native-agent.py --agent-dir "$(CAYRN_LFE_DIR)"

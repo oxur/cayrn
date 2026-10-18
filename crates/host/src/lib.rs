@@ -1,9 +1,10 @@
 //! Standalone local fixture host. Journal policy is shared with cayrn-core;
 //! each session has a bounded queue, owning thread and separate fixture process.
+mod agent;
 mod journal;
 mod runtime;
 
-use cayrn_core::{Admission, Journal, execute};
+use cayrn_core::{Admission, Journal, Outcome, Runtime, execute};
 use cayrn_protocol::{
     Call, ErrorCode, Fault, Operation, Reply, Request, Response, Result, SessionState, Submission,
     VERSION, validate_id, wire,
@@ -28,6 +29,35 @@ use tokio::{
     task::JoinSet,
 };
 
+#[derive(Clone)]
+enum Backend {
+    Fixture(PathBuf),
+    Agent(PathBuf),
+}
+enum Execution {
+    Fixture(ProcessRuntime),
+    Agent(agent::AgentRuntime),
+}
+impl Runtime for Execution {
+    fn evaluate(
+        &mut self,
+        source: &str,
+        emit: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Outcome> {
+        match self {
+            Self::Fixture(r) => r.evaluate(source, emit),
+            Self::Agent(r) => r.evaluate(source, emit),
+        }
+    }
+}
+impl Execution {
+    fn prepare(&mut self, sub: &Submission) -> Result<()> {
+        match self {
+            Self::Fixture(_) => Ok(()),
+            Self::Agent(r) => r.prepare(sub),
+        }
+    }
+}
 struct Job {
     submission: Submission,
     reply: mpsc::SyncSender<Result<Operation>>,
@@ -36,11 +66,15 @@ struct Worker {
     sender: Option<mpsc::SyncSender<Job>>,
     stop: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
+    control: Option<agent::Control>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.sender.take();
+        if let Some(control) = &self.control {
+            control.stop();
+        }
         if let Some(join) = self.join.take()
             && join.join().is_err()
         {
@@ -51,7 +85,8 @@ impl Drop for Worker {
 struct Service {
     journal: SqliteJournal,
     workers: Mutex<HashMap<String, Worker>>,
-    program: PathBuf,
+    backend: Backend,
+    authority: String,
     stopping: AtomicBool,
 }
 impl Service {
@@ -62,7 +97,11 @@ impl Service {
         match request {
             Request::Describe => Ok(Response::Description {
                 version: VERSION,
-                backend: "fixture-only".into(),
+                backend: match self.backend {
+                    Backend::Fixture(_) => "fixture-only",
+                    Backend::Agent(_) => "native-agent",
+                }
+                .into(),
                 operations: [
                     "describe",
                     "create",
@@ -78,7 +117,9 @@ impl Service {
                 let state = self.journal.create()?;
                 let (sender, receiver) = mpsc::sync_channel::<Job>(128);
                 let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-                let program = self.program.clone();
+                let backend = self.backend.clone();
+                let authority = self.authority.clone();
+                let context = state.clone();
                 let journal = self.journal.clone();
                 let sid = state.id.clone();
                 let stop = Arc::new(AtomicBool::new(false));
@@ -86,9 +127,25 @@ impl Service {
                 let join = thread::Builder::new()
                     .name(format!("cayrn-{}", state.id))
                     .spawn(move || {
-                        let mut runtime = match ProcessRuntime::spawn(&program) {
+                        let opened = match backend {
+                            Backend::Fixture(program) => {
+                                ProcessRuntime::spawn(&program).map(Execution::Fixture)
+                            }
+                            Backend::Agent(socket) => agent::AgentRuntime::connect(
+                                &socket,
+                                &context,
+                                &authority,
+                                journal.clone(),
+                            )
+                            .map(Execution::Agent),
+                        };
+                        let mut runtime = match opened {
                             Ok(runtime) => {
-                                if ready_tx.send(Ok(())).is_err() {
+                                let control = match &runtime {
+                                    Execution::Agent(r) => Some(r.control()),
+                                    _ => None,
+                                };
+                                if ready_tx.send(Ok(control)).is_err() {
                                     return;
                                 }
                                 runtime
@@ -101,7 +158,15 @@ impl Service {
                                 return;
                             }
                         };
-                        for job in receiver {
+                        loop {
+                            let job=match receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+                                Ok(job)=>job,
+                                Err(mpsc::RecvTimeoutError::Timeout)=>{
+                                    if matches!(&runtime,Execution::Agent(r) if r.control().stopped()) { break; }
+                                    continue;
+                                },
+                                Err(mpsc::RecvTimeoutError::Disconnected)=>break,
+                            };
                             if stopped.load(Ordering::Acquire) {
                                 break;
                             }
@@ -113,21 +178,24 @@ impl Service {
                             // A vanished client is a lost observer, not cancellation.
                             let _ = job.reply.send(reply);
                             if run
-                                && let Err(error) = execute(&journal, &mut runtime, &job.submission)
+                                && let Err(error) = runtime
+                                    .prepare(&job.submission)
+                                    .and_then(|()| execute(&journal, &mut runtime, &job.submission))
                             {
                                 eprintln!("session quarantined: {error}");
                                 break;
                             }
                         }
                     })?;
+                let control = ready_rx.recv().map_err(|_| {
+                    Fault::new(ErrorCode::Unavailable, "runtime owner did not initialize")
+                })??;
                 let worker = Worker {
                     sender: Some(sender),
                     stop,
                     join: Some(join),
+                    control,
                 };
-                ready_rx.recv().map_err(|_| {
-                    Fault::new(ErrorCode::Unavailable, "runtime owner did not initialize")
-                })??;
                 let mut workers = self
                     .workers
                     .lock()
@@ -236,8 +304,22 @@ impl Host {
     /// Acquire exclusive directory ownership, recover the journal and bind a socket.
     /// The worker executable must implement the internal fixture framing.
     pub async fn bind(directory: impl AsRef<Path>, worker: impl AsRef<Path>) -> Result<Self> {
-        let directory = directory.as_ref().to_owned();
-        let program = std::fs::canonicalize(worker.as_ref())?;
+        Self::bind_backend(
+            directory.as_ref(),
+            Backend::Fixture(std::fs::canonicalize(worker.as_ref())?),
+        )
+        .await
+    }
+    /// Connect each new session to the shared native-agent endpoint.
+    pub async fn bind_agent(directory: impl AsRef<Path>, socket: impl AsRef<Path>) -> Result<Self> {
+        Self::bind_backend(
+            directory.as_ref(),
+            Backend::Agent(std::fs::canonicalize(socket.as_ref())?),
+        )
+        .await
+    }
+    async fn bind_backend(directory: &Path, backend: Backend) -> Result<Self> {
+        let directory = directory.to_owned();
         let (journal, directory) =
             tokio::task::spawn_blocking(move || SqliteJournal::open(&directory))
                 .await
@@ -258,7 +340,8 @@ impl Host {
             service: Arc::new(Service {
                 journal,
                 workers: Mutex::new(HashMap::new()),
-                program,
+                backend,
+                authority: uuid::Uuid::new_v4().to_string(),
                 stopping: AtomicBool::new(false),
             }),
             socket,
@@ -299,6 +382,9 @@ impl Host {
         if let Ok(workers) = self.service.workers.lock() {
             for worker in workers.values() {
                 worker.stop.store(true, Ordering::Release);
+                if let Some(control) = &worker.control {
+                    control.stop();
+                }
             }
         }
         let _ = stop_tx.send(true);

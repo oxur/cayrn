@@ -6,10 +6,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Cayrn local session demonstrator (fixture backend only)"
-)]
+#[command(version, about = "Cayrn local durable session host and client")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -27,6 +24,13 @@ enum Command {
         state_dir: PathBuf,
         #[arg(long)]
         worker: PathBuf,
+    },
+    /// Start a host connected to a shared native-agent socket.
+    ServeAgent {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        agent_socket: PathBuf,
     },
     /// Send one prototype JSON request; disconnecting never closes its session.
     Request {
@@ -60,6 +64,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 io::stdout(),
                 "{}",
                 serde_json::json!({"socket":host.socket_path(),"backend":"fixture-only"})
+            )?;
+            host.serve(async {
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    eprintln!("signal handler: {e}");
+                }
+            })
+            .await?;
+        }
+        Command::ServeAgent {
+            state_dir,
+            agent_socket,
+        } => {
+            let host = cayrn_host::Host::bind_agent(state_dir, agent_socket).await?;
+            writeln!(
+                io::stdout(),
+                "{}",
+                serde_json::json!({"socket":host.socket_path(),"backend":"native-agent"})
             )?;
             host.serve(async {
                 if let Err(e) = tokio::signal::ctrl_c().await {
