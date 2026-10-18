@@ -95,21 +95,37 @@ Cayrn copies `cayrn` and `cayrn-fixture` into its `./bin`. This walkthrough uses
 
 ## 2. Start an isolated agent and host
 
-In **A**, make a fresh private directory and start the native agent:
+In **A**, create the test directory **once** and print the command that the
+other tabs need:
 
 ```bash
 export CAYRN_RUN_DIR="$(mktemp -d /private/tmp/cayrn-manual.XXXXXX)"
+printf '\nCopy this generated command into B, C and D:\n'
 printf 'export CAYRN_RUN_DIR=%q\n' "$CAYRN_RUN_DIR"
+```
 
+The **output** will contain a literal command such as:
+
+```text
+export CAYRN_RUN_DIR=/private/tmp/cayrn-manual.RweyHe
+```
+
+That path is an example; use the actual path printed by your run. **Execute the
+printed literal export command in B, C and D before their startup commands.**
+Copy the output line with the actual path, not the `mktemp` command or the
+`printf` command. A shell variable in A is not shared with another tab. Running
+`mktemp` again would create a different directory.
+
+Then, still in **A**, start the native agent:
+
+```bash
 /Users/oubiwann/lab/lfe/cayrn-lfe/bin/cayrn-lfe \
   "$CAYRN_RUN_DIR/agent.sock" >"$CAYRN_RUN_DIR/agent.log" 2>&1 &
 CAYRN_AGENT_PID=$!
 printf 'Agent PID: %s\n' "$CAYRN_AGENT_PID"
 ```
 
-Keep A open; it owns the PID used during cleanup. **Copy the printed `export
-CAYRN_RUN_DIR=...` line into B, C and D.** A shell variable in one tab is not
-shared with another tab. Do not run `mktemp` again in those tabs.
+Keep A open; it owns the PID used during cleanup.
 
 Check readiness in A:
 
@@ -120,7 +136,7 @@ test -S "$CAYRN_RUN_DIR/agent.sock" && echo 'Agent socket ready'
 If startup is still in progress, repeat that check. If it never appears, inspect
 `cat "$CAYRN_RUN_DIR/agent.log"` and stop here until the cause is resolved.
 
-In **B**, after copying the export line:
+In **B**, after executing the generated literal export command from A:
 
 ```bash
 /Users/oubiwann/lab/oxur/cayrn/bin/cayrn serve-agent \
@@ -210,8 +226,20 @@ The saved counter remains `42`.
 ## 4. Detach, reconnect and replay without reevaluating
 
 Type `:quit` in **both C and D**. This detaches the clients. Record each terminal's
-`Detached. Resume session ... after displayed cursor N` message. The cursors can
-differ because each client displays events independently.
+`Detached. Resume session ... after displayed cursor N` message. **The cursor is
+the decimal number after `displayed cursor`, not a UUID from an evaluation.**
+For example:
+
+```text
+Detached. Resume session 2f8a6b01-908b-4023-b698-b4c196a220af after displayed cursor 20
+```
+
+Here the session ID is `2f8a6b01-908b-4023-b698-b4c196a220af`, and the resume
+cursor is `20`. An earlier result such as
+`[ff588e61-6c30-4345-a13b-09b21e3ba1ec Succeeded] 42` shows an **operation ID**
+and its value; that UUID is not a cursor. An evaluation can produce several
+transcript events, each with its own numeric position. The cursors can differ
+between clients because each client displays events independently.
 
 In A:
 
@@ -232,11 +260,15 @@ Press Enter on an empty line to display replay, then evaluate `counter`.
 **Pass:** old source/results/output reappear as history, and the live value is
 still `42`. Replay has not reapplied the increment.
 
-In C, attach using **C's last displayed cursor** in place of `N`:
+In **C's shell**, enter the session ID and numeric cursor from **C's own
+detach message** when prompted. The cursor would be `20` in the example above;
+your run may have a different number:
 
 ```bash
+read -r -p 'Session ID from C detach message: ' SESSION_ID
+read -r -p 'Number after displayed cursor in C detach message: ' CAYRN_AFTER
 /Users/oubiwann/lab/lfe/xrepl/xrepl/target/debug/xrepl \
-  --cayrn "$CAYRN_RUN_DIR/host" --session 'paste-the-session-id-here' --after N
+  --cayrn "$CAYRN_RUN_DIR/host" --session "$SESSION_ID" --after "$CAYRN_AFTER"
 ```
 
 `--after` means the last event already displayed, not the next wanted event.
@@ -301,13 +333,14 @@ Use a **new session** for this test: quit C, then start C again **without
 ```
 
 Keep D attached to the original session. Record C's new session ID in A as
-`INTERRUPT_SESSION_ID` if you want to inspect it. In C:
+`INTERRUPT_SESSION_ID` if you want to inspect it. **Read this before submitting
+the next expression:** once `INTERRUPT-START` appears, press Ctrl-C in C during
+the ten-second sleep. Waiting for `99` lets the evaluation finish normally.
 
 ```lfe
 (progn (io:format "INTERRUPT-START~n" ()) (timer:sleep 10000) 99)
 ```
 
-After `INTERRUPT-START`, press **Ctrl-C in C while the evaluation is running**.
 **Pass:** the client reports `interrupt_requested_session_destructive`; the
 operation eventually reports cancelled and the session reports state loss.
 The receipt alone is not confirmation. A completed operation can win the race,
@@ -352,7 +385,15 @@ CLOSED_SUBMISSION="$(printf '{"op":"submit","submission":{"session":"%s","genera
 cayrn_request "$CLOSED_SUBMISSION"
 ```
 
-**Pass:** the CLI exits nonzero with an error; no evaluation is admitted. Retrying
+**Pass:** the CLI exits nonzero with an error; no evaluation is admitted.
+**Known diagnostic issue:** the current host reports
+`StateLost: session runtime state was lost` for new submissions to closing or
+closed sessions as well as state-lost sessions. This conflates distinct lifecycle
+states. If inspection says `closed` and the transcript ends in `session_closed`,
+the archive was closed successfully; this rejection does not mean it subsequently
+lost its history. Error classification/wording needs a separate correction.
+
+Retrying
 the old matching `runbook-once` submission would instead return its existing
 record, so it is not a valid test for rejecting new work. A repeated close is
 idempotent:
@@ -366,11 +407,28 @@ cayrn_request "{\"op\":\"close\",\"session\":\"$SESSION_ID\"}"
 Use this after the other tests. Create a fresh session in C, record its ID, and
 save `(set restart-probe 17)`. In A, set
 `RESTART_SESSION_ID='paste-the-new-session-id-here'`. Quit C.
-Press Ctrl-C in **B** to stop the host,
-then restart it with the identical `serve-agent` command and state directory.
-Keep the native agent in A running throughout.
+Keep the native agent in A running throughout. Perform the stop/restart in
+**B** before making any requests from A:
 
-In A, inspect the saved session and read its history:
+1. Press **Ctrl-C in B** to stop the host and return to its shell prompt.
+2. In that same B shell, restart the host using the existing state directory:
+
+   ```bash
+   /Users/oubiwann/lab/oxur/cayrn/bin/cayrn serve-agent \
+     --state-dir "$CAYRN_RUN_DIR/host" \
+     --agent-socket "$CAYRN_RUN_DIR/agent.sock"
+   ```
+
+3. Wait for the startup JSON identifying the `native-agent` backend and host
+   socket. Leave B running.
+
+Do not create a new temporary directory or restart the native agent. While the
+host is stopped, `cayrn_request` cannot connect: `Io: No such file or directory`
+is expected because its socket is absent. The request CLI needs a running host;
+it does not read the journal offline. That connection error is not evidence of
+transcript loss.
+
+**After B has restarted**, in **A**, inspect the saved session and read its history:
 
 ```bash
 cayrn_request "{\"op\":\"inspect_session\",\"session\":\"$RESTART_SESSION_ID\"}"
