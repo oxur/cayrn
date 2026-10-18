@@ -43,6 +43,7 @@ help:
 	@printf '  %bmake build-release%b      - Build and copy optimized release binaries\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake build MODE=release%b - Equivalent release build\n' '$(YELLOW)' '$(RESET)'
 	@printf '\n%bTesting & Quality:%b\n' '$(GREEN)' '$(RESET)'
+	@printf '  %bmake test-xrepl%b         - Real shared LFE session and xrepl/PTY checks\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake test-agent%b         - Real LFE/OTP integration (requires cayrn-lfe)\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake test%b               - Run all workspace test targets\n' '$(YELLOW)' '$(RESET)'
 	@printf '  %bmake lint%b               - Check formatting and Clippy (warnings fail)\n' '$(YELLOW)' '$(RESET)'

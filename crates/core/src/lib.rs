@@ -26,6 +26,8 @@ pub trait Journal: Clone + Send + Sync + 'static {
 pub enum Outcome {
     Value(String),
     Error(String),
+    /// Native execution was confirmed stopped; the environment may be lost.
+    Cancelled(String),
 }
 /// Native execution seam. A live VM need not implement Send or run on Tokio.
 pub trait Runtime {
@@ -52,6 +54,7 @@ pub fn execute(
         match outcome {
             Outcome::Value(value) => journal.finish(submission, Phase::Succeeded, &value),
             Outcome::Error(error) => journal.finish(submission, Phase::Failed, &error),
+            Outcome::Cancelled(reason) => journal.finish(submission, Phase::Cancelled, &reason),
         }
     })();
     if let Err(error) = attempt {

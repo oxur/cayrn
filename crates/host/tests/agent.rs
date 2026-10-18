@@ -150,3 +150,215 @@ async fn wrong_agent_version_cannot_create_a_usable_context() {
     task.await.unwrap().unwrap();
     peer.join().unwrap();
 }
+
+#[tokio::test]
+async fn link_loss_during_close_never_seals_without_native_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("agent.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read(&mut stream);
+        write(
+            &mut stream,
+            json!({"kind":"ready","version":1,"backend":"incomplete-close-double","close_barrier":true}),
+        );
+        assert_eq!(read(&mut stream)["kind"], "close");
+        // Socket EOF is deliberately substituted for a barrier; it must not count.
+    });
+    let host = Host::bind_agent(root.path().join("state"), socket)
+        .await
+        .unwrap();
+    let mut client = Client::connect(host.socket_path()).await.unwrap();
+    let (stop, rx) = oneshot::channel();
+    let task = tokio::spawn(host.serve(async {
+        let _ = rx.await;
+    }));
+    let Response::Session(session) = client.request(Request::Create).await.unwrap() else {
+        panic!()
+    };
+    client
+        .request(Request::Close {
+            session: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let page = timeout(Duration::from_secs(3), async {
+        loop {
+            let Response::Events(page) = client
+                .request(Request::Read {
+                    session: session.id.clone(),
+                    after: Cursor(0),
+                    limit: 64,
+                })
+                .await
+                .unwrap()
+            else {
+                panic!()
+            };
+            if page
+                .events
+                .iter()
+                .any(|e| matches!(e.event, EventKind::StateLost { .. }))
+            {
+                break page;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !page
+            .events
+            .iter()
+            .any(|e| matches!(e.event, EventKind::SessionClosed))
+    );
+    let Response::Session(state) = client
+        .request(Request::InspectSession {
+            session: session.id,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(state.state, cayrn_protocol::SessionState::Closing);
+    stop.send(()).unwrap();
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    peer.join().unwrap();
+}
+
+#[tokio::test]
+async fn cooperative_agent_interrupt_preserves_context_without_language_assumptions() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("agent.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (started, ready) = oneshot::channel();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read(&mut stream);
+        write(
+            &mut stream,
+            json!({"kind":"ready","version":1,"backend":"cooperative-double","interrupt":"cooperative"}),
+        );
+        let first = read(&mut stream);
+        started.send(()).unwrap();
+        assert_eq!(
+            read(&mut stream),
+            json!({"kind":"cancel","operation":first["operation"]})
+        );
+        write(
+            &mut stream,
+            json!({"kind":"outcome","operation":first["operation"],"phase":"cancelled","value":"cooperatively interrupted"}),
+        );
+        let second = read(&mut stream);
+        write(
+            &mut stream,
+            json!({"kind":"outcome","operation":second["operation"],"phase":"succeeded","value":"context retained"}),
+        );
+        let mut b = [0];
+        let _ = stream.read(&mut b);
+    });
+    let host = Host::bind_agent(root.path().join("state"), socket)
+        .await
+        .unwrap();
+    let mut client = Client::connect(host.socket_path()).await.unwrap();
+    let (stop, rx) = oneshot::channel();
+    let task = tokio::spawn(host.serve(async {
+        let _ = rx.await;
+    }));
+    let Response::Session(session) = client.request(Request::Create).await.unwrap() else {
+        panic!()
+    };
+    let make = |id: &str| Submission {
+        session: session.id.clone(),
+        generation: session.generation.clone(),
+        operation: id.into(),
+        client: "test".into(),
+        source: id.into(),
+    };
+    client
+        .request(Request::Submit {
+            submission: make("wait"),
+        })
+        .await
+        .unwrap();
+    ready.await.unwrap();
+    assert_eq!(
+        client
+            .request(Request::Cancel {
+                session: session.id.clone(),
+                operation: "wait".into()
+            })
+            .await
+            .unwrap(),
+        Response::Control {
+            disposition: "interrupt_requested_cooperative".into()
+        }
+    );
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let Response::Operation(op) = client
+                .request(Request::InspectOperation {
+                    session: session.id.clone(),
+                    operation: "wait".into(),
+                })
+                .await
+                .unwrap()
+            else {
+                panic!()
+            };
+            if op.phase == Phase::Cancelled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    client
+        .request(Request::Submit {
+            submission: make("probe"),
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let Response::Operation(op) = client
+                .request(Request::InspectOperation {
+                    session: session.id.clone(),
+                    operation: "probe".into(),
+                })
+                .await
+                .unwrap()
+            else {
+                panic!()
+            };
+            if op.phase == Phase::Succeeded {
+                assert_eq!(op.value.as_deref(), Some("context retained"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let Response::Session(state) = client
+        .request(Request::InspectSession {
+            session: session.id,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(state.state, cayrn_protocol::SessionState::Active);
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    peer.join().unwrap();
+}

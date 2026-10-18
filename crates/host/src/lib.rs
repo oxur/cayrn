@@ -90,6 +90,15 @@ struct Service {
     stopping: AtomicBool,
 }
 impl Service {
+    fn control(&self, sid: &str) -> Result<agent::Control> {
+        self.workers
+            .lock()
+            .map_err(|_| Fault::new(ErrorCode::Unavailable, "worker registry poisoned"))?
+            .get(sid)
+            .and_then(|w| w.control.clone())
+            .ok_or_else(|| Fault::new(ErrorCode::Unsupported, "native session control unavailable"))
+    }
+
     fn handle(&self, request: Request) -> Result<Response> {
         if self.stopping.load(Ordering::Acquire) {
             return Err(Fault::new(ErrorCode::Unavailable, "host is stopping"));
@@ -110,10 +119,61 @@ impl Service {
                     "inspect_operation",
                     "read",
                     "follow",
+                    "cancel",
+                    "close",
                 ]
                 .map(str::to_owned)
                 .to_vec(),
             }),
+            Request::Cancel { session, operation } => {
+                validate_id(&session)?;
+                validate_id(&operation)?;
+                let op = self.journal.lookup(&session, &operation)?;
+                if !matches!(
+                    op.phase,
+                    cayrn_protocol::Phase::Queued | cayrn_protocol::Phase::Dispatched
+                ) {
+                    return Ok(Response::Control {
+                        disposition: "already_terminal".into(),
+                    });
+                }
+                let control = self.control(&session)?;
+                let disposition = match control.interrupt {
+                    cayrn_protocol::agent::InterruptMode::Unsupported => {
+                        return Err(Fault::new(
+                            ErrorCode::Unsupported,
+                            "agent cannot interrupt this context",
+                        ));
+                    }
+                    cayrn_protocol::agent::InterruptMode::Cooperative => {
+                        "interrupt_requested_cooperative"
+                    }
+                    cayrn_protocol::agent::InterruptMode::SessionDestructive => {
+                        "interrupt_requested_session_destructive"
+                    }
+                };
+                control.command(&cayrn_protocol::agent::Command::Cancel { operation })?;
+                Ok(Response::Control {
+                    disposition: disposition.into(),
+                })
+            }
+            Request::Close { session } => {
+                validate_id(&session)?;
+                let previous = self.journal.inspect(&session)?;
+                if matches!(previous.state, SessionState::Closing | SessionState::Closed) {
+                    return Ok(Response::Session(previous));
+                }
+                let control = self.control(&session)?;
+                if !control.close_barrier {
+                    return Err(Fault::new(
+                        ErrorCode::Unsupported,
+                        "agent does not provide a managed close barrier",
+                    ));
+                }
+                let state = self.journal.begin_close(&session)?;
+                control.command(&cayrn_protocol::agent::Command::Close)?;
+                Ok(Response::Session(state))
+            }
             Request::Create => {
                 let state = self.journal.create()?;
                 let (sender, receiver) = mpsc::sync_channel::<Job>(128);
@@ -168,7 +228,7 @@ impl Service {
                                 },
                                 Err(mpsc::RecvTimeoutError::Disconnected)=>break,
                             };
-                            if stopped.load(Ordering::Acquire) {
+                            if stopped.load(Ordering::Acquire) || matches!(&runtime,Execution::Agent(r) if r.control().stopped()) {
                                 break;
                             }
                             let admission = journal.admit(&job.submission);

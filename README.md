@@ -100,13 +100,16 @@ runtime loss. The worker protocol is internal fixture infrastructure.
 
 This is an experimental Unix-only profile with a provisional JSON wire/schema.
 Frame parsing rejects malformed/oversized payloads. The private directory is the
-initial access boundary; there is no authenticated remote TCP service. Live
-follow, cancellation, program input, session close/archive/delete, production language
-adapters and an interactive Cayrn CLI are still future work. The xrepl Rust
-terminal now offers an experimental Reedline consumer of native sessions. The native LFE prototype is described
-separately above. No checkpoints, automatic failover,
-production readiness or power-loss certification is claimed. Records remain
-local and are not pruned automatically; choose your state-directory location.
+initial access boundary; there is no authenticated remote TCP service. Cursor
+follow is implemented. Native agents negotiate interruption strength and managed
+close-barrier support; the LFE profile supports session-destructive interruption
+and close with retained read-only history. Fixture control returns unsupported.
+Program input, archive deletion, other real language adapters, richer editor
+services and an interactive Cayrn CLI remain future work. The xrepl Rust terminal
+provides an experimental Reedline consumer of native sessions. No checkpoints,
+automatic failover, production readiness or power-loss certification is claimed.
+Records remain local and are not pruned automatically. See the native profile's
+capture/ownership limits before using it with a shared BEAM application.
 
 ## Rust packages
 

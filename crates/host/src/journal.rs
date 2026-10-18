@@ -89,7 +89,7 @@ fn save_operation(db: &Connection, op: &Operation) -> Result<()> {
 }
 fn lose(db: &Connection, sid: &str, reason: &str) -> Result<()> {
     let mut state = session(db, sid)?;
-    if state.state == SessionState::StateLost {
+    if matches!(state.state, SessionState::StateLost | SessionState::Closed) {
         return Ok(());
     }
     let operations = {
@@ -121,7 +121,9 @@ fn lose(db: &Connection, sid: &str, reason: &str) -> Result<()> {
             },
         )?;
     }
-    state.state = SessionState::StateLost;
+    if state.state != SessionState::Closing {
+        state.state = SessionState::StateLost;
+    }
     db.execute(
         "UPDATE sessions SET json=?2 WHERE id=?1",
         params![sid, encode(&state)?],
@@ -194,7 +196,7 @@ impl SqliteJournal {
         let tx = connection.transaction().map_err(storage)?;
         let sessions = {
             let mut statement = tx
-                .prepare("SELECT id FROM sessions WHERE json_extract(json,'$.state')='active'")
+                .prepare("SELECT id FROM sessions WHERE json_extract(json,'$.state') IN ('active','closing')")
                 .map_err(storage)?;
             statement
                 .query_map([], |r| r.get::<_, String>(0))
@@ -253,6 +255,70 @@ impl SqliteJournal {
         append(&tx, &state, EventKind::SessionCreated)?;
         tx.commit().map_err(storage)?;
         Ok(state)
+    }
+    pub(crate) fn begin_close(&self, sid: &str) -> Result<Session> {
+        let mut db = self.db()?;
+        let tx = db.transaction().map_err(storage)?;
+        let mut state = session(&tx, sid)?;
+        if matches!(state.state, SessionState::Closing | SessionState::Closed) {
+            return Ok(state);
+        }
+        state.state = SessionState::Closing;
+        tx.execute(
+            "UPDATE sessions SET json=?2 WHERE id=?1",
+            params![sid, encode(&state)?],
+        )
+        .map_err(storage)?;
+        append(&tx, &state, EventKind::SessionClosing)?;
+        let queued = {
+            let mut q=tx.prepare("SELECT json FROM operations WHERE session=?1 AND json_extract(json,'$.phase')='queued'").map_err(storage)?;
+            q.query_map([sid], |r| r.get::<_, String>(0))
+                .map_err(storage)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage)?
+        };
+        for json in queued {
+            let mut op: Operation = decode(&json)?;
+            op.phase = Phase::Cancelled;
+            op.value = Some("session closed before dispatch".into());
+            save_operation(&tx, &op)?;
+            append(
+                &tx,
+                &state,
+                EventKind::Outcome {
+                    operation: op.submission.operation,
+                    phase: op.phase,
+                    value: op.value,
+                },
+            )?;
+        }
+        tx.commit().map_err(storage)?;
+        Ok(state)
+    }
+    pub(crate) fn seal(&self, sid: &str) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction().map_err(storage)?;
+        let mut state = session(&tx, sid)?;
+        if state.state == SessionState::Closed {
+            return Ok(());
+        }
+        if state.state != SessionState::Closing {
+            return Err(storage("unsolicited native close barrier"));
+        }
+        let unfinished:i64=tx.query_row("SELECT COUNT(*) FROM operations WHERE session=?1 AND json_extract(json,'$.phase') IN ('queued','dispatched')",[sid],|r|r.get(0)).map_err(storage)?;
+        if unfinished != 0 {
+            return Err(storage(
+                "native close barrier precedes operation dispositions",
+            ));
+        }
+        state.state = SessionState::Closed;
+        tx.execute(
+            "UPDATE sessions SET json=?2 WHERE id=?1",
+            params![sid, encode(&state)?],
+        )
+        .map_err(storage)?;
+        append(&tx, &state, EventKind::SessionClosed)?;
+        tx.commit().map_err(storage)
     }
     pub(crate) fn inspect(&self, sid: &str) -> Result<Session> {
         let db = self.db()?;
@@ -379,9 +445,16 @@ impl Journal for SqliteJournal {
         }
         let mut db = self.db()?;
         let tx = db.transaction().map_err(storage)?;
+        let state = session(&tx, &sub.session)?;
+        if !matches!(state.state, SessionState::Active | SessionState::Closing) {
+            return Err(Fault::new(
+                ErrorCode::StateLost,
+                "capture context no longer writable",
+            ));
+        }
         append(
             &tx,
-            &session(&tx, &sub.session)?,
+            &state,
             EventKind::Output {
                 operation: sub.operation.clone(),
                 text: text.to_owned(),
@@ -394,8 +467,13 @@ impl Journal for SqliteJournal {
         let tx = db.transaction().map_err(storage)?;
         let mut op = operation(&tx, &sub.session, &sub.operation)?
             .ok_or_else(|| storage("missing dispatched operation"))?;
+        if op.phase == phase && op.value.as_deref() == Some(value) {
+            return Ok(());
+        }
         if op.phase != Phase::Dispatched {
-            return Err(storage("outcome does not follow dispatch"));
+            return Err(storage(
+                "outcome conflicts with terminal state or does not follow dispatch",
+            ));
         }
         op.phase = phase;
         op.value = Some(value.to_owned());

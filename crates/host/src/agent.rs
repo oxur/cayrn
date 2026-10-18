@@ -6,7 +6,7 @@ use cayrn_protocol::{
     agent::{self, Command, Event},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
@@ -47,8 +47,17 @@ fn read(stream: &mut UnixStream) -> Result<Event> {
 pub(crate) struct Control {
     socket: Arc<UnixStream>,
     stopped: Arc<AtomicBool>,
+    writer: Arc<Mutex<UnixStream>>,
+    pub(crate) interrupt: agent::InterruptMode,
+    pub(crate) close_barrier: bool,
 }
 impl Control {
+    pub(crate) fn command(&self, command: &Command) -> Result<()> {
+        write(
+            &mut *self.writer.lock().map_err(|_| fault("writer poisoned"))?,
+            command,
+        )
+    }
     pub(crate) fn stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
     }
@@ -91,17 +100,26 @@ impl AgentRuntime {
                 authority: authority.into(),
             },
         )?;
-        match read(&mut socket)? {
-            Event::Ready { version, backend }
-                if version == agent::VERSION && !backend.is_empty() && backend.len() <= 128 => {}
+        let (interrupt, close_barrier) = match read(&mut socket)? {
+            Event::Ready {
+                version,
+                backend,
+                interrupt,
+                close_barrier,
+            } if version == agent::VERSION && !backend.is_empty() && backend.len() <= 128 => {
+                (interrupt, close_barrier)
+            }
             _ => return Err(fault("unsupported agent handshake")),
-        }
+        };
         socket.set_read_timeout(None)?;
+        let writer = Arc::new(Mutex::new(socket.try_clone()?));
         let control = Control {
             socket: Arc::new(socket.try_clone()?),
             stopped: Arc::new(AtomicBool::new(false)),
+            writer: writer.clone(),
+            interrupt,
+            close_barrier,
         };
-        let writer = Arc::new(Mutex::new(socket.try_clone()?));
         let operations = Arc::new(Mutex::new(HashMap::<String, Submission>::new()));
         let mapped = operations.clone();
         let output = writer.clone();
@@ -113,6 +131,7 @@ impl AgentRuntime {
             .spawn(move || {
                 let result = (|| -> Result<()> {
                     let mut position = 0u64;
+                    let mut completed = HashSet::new();
                     loop {
                         match read(&mut socket)? {
                             Event::Output {
@@ -145,17 +164,42 @@ impl AgentRuntime {
                                 phase,
                                 value,
                             } => {
+                                if !completed.insert(operation.clone()) {
+                                    return Err(fault("repeated native outcome"));
+                                }
                                 if value.len() > cayrn_protocol::MAX_SOURCE {
                                     return Err(fault("agent value exceeds capture limit"));
                                 }
+                                let sub = mapped
+                                    .lock()
+                                    .map_err(|_| fault("operation mapping poisoned"))?
+                                    .get(&operation)
+                                    .cloned()
+                                    .ok_or_else(|| fault("unknown native outcome operation"))?;
+                                if !matches!(
+                                    phase,
+                                    cayrn_protocol::Phase::Succeeded
+                                        | cayrn_protocol::Phase::Failed
+                                        | cayrn_protocol::Phase::Cancelled
+                                ) {
+                                    return Err(fault("invalid native outcome phase"));
+                                }
+                                journal.finish(&sub, phase, &value)?;
                                 let outcome = match phase {
                                     cayrn_protocol::Phase::Succeeded => Outcome::Value(value),
                                     cayrn_protocol::Phase::Failed => Outcome::Error(value),
+                                    cayrn_protocol::Phase::Cancelled => Outcome::Cancelled(value),
                                     _ => return Err(fault("invalid native outcome phase")),
                                 };
                                 tx.try_send(Ok((operation, outcome)))
                                     .map_err(|_| fault("unsolicited or repeated native outcome"))?;
                             }
+                            Event::Closed => {
+                                journal.seal(&sid)?;
+                                reader_control.stop();
+                                return Ok(());
+                            }
+                            Event::Lost { reason } => return Err(fault(reason)),
                             Event::Ready { .. } => return Err(fault("repeated native handshake")),
                         }
                     }

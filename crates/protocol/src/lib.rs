@@ -37,6 +37,7 @@ impl From<Cursor> for String {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ErrorCode {
+    Unsupported,
     InvalidRequest,
     NotFound,
     Conflict,
@@ -58,10 +59,15 @@ pub struct Fault {
 impl Fault {
     /// Construct a typed public fault.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
+        let mut message = message.into();
+        if message.len() > MAX_SOURCE {
+            let mut boundary = MAX_SOURCE;
+            while !message.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            message.truncate(boundary);
         }
+        Self { code, message }
     }
 }
 impl fmt::Display for Fault {
@@ -82,6 +88,8 @@ pub type Result<T> = std::result::Result<T, Fault>;
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Active,
+    Closing,
+    Closed,
     StateLost,
 }
 /// Stable session identity and its live-state generation.
@@ -159,6 +167,8 @@ pub struct Operation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
     SessionCreated,
+    SessionClosing,
+    SessionClosed,
     Accepted {
         submission: Submission,
     },
@@ -199,6 +209,15 @@ pub struct Page {
 pub enum Request {
     Describe,
     Create,
+    /// Session-scoped interruption; receipt does not imply completed cancellation.
+    Cancel {
+        session: String,
+        operation: String,
+    },
+    /// Begin quiescence; completion is observed through session state/events.
+    Close {
+        session: String,
+    },
     InspectSession {
         session: String,
     },
@@ -226,6 +245,10 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Response {
+    /// A control request disposition, distinct from its eventual effect.
+    Control {
+        disposition: String,
+    },
     Description {
         version: u16,
         backend: String,
@@ -266,6 +289,18 @@ pub mod agent {
     use serde::{Deserialize, Serialize};
     /// Current experimental native-agent version.
     pub const VERSION: u16 = 1;
+    /// Actual interruption strength, advertised by the native integration.
+    #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum InterruptMode {
+        /// No safe interruption mechanism is available.
+        #[default]
+        Unsupported,
+        /// Agent can interrupt while retaining its execution context.
+        Cooperative,
+        /// Interruption discards this session's native execution context.
+        SessionDestructive,
+    }
     /// Host-to-agent control and execution; no evaluated-language fields.
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -285,6 +320,10 @@ pub mod agent {
         Ack {
             position: Cursor,
         },
+        Cancel {
+            operation: String,
+        },
+        Close,
         Stop,
     }
     /// Agent-to-host capture and outcomes. Position is a connection-local exact cursor.
@@ -294,6 +333,10 @@ pub mod agent {
         Ready {
             version: u16,
             backend: String,
+            #[serde(default)]
+            interrupt: InterruptMode,
+            #[serde(default)]
+            close_barrier: bool,
         },
         Output {
             operation: String,
@@ -304,6 +347,10 @@ pub mod agent {
             operation: String,
             phase: Phase,
             value: String,
+        },
+        Closed,
+        Lost {
+            reason: String,
         },
     }
 }

@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import sqlite3
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--agent-dir', type=Path, required=True)
@@ -53,7 +54,15 @@ class Client:
 def wait_socket(path, process):
     for _ in range(200):
         if path.exists():
-            return
+            probe = socket.socket(socket.AF_UNIX)
+            try:
+                probe.settimeout(.05)
+                probe.connect(str(path))
+                return
+            except (ConnectionRefusedError, FileNotFoundError, socket.timeout):
+                pass
+            finally:
+                probe.close()
         assert process.poll() is None, f'process stopped: {process.returncode}'
         time.sleep(.025)
     raise TimeoutError(str(path))
@@ -260,18 +269,138 @@ with tempfile.TemporaryDirectory(prefix='cayrn-native-', dir='/private/tmp') as 
                     stop(interactive)
                     os.close(master)
                 print('PASS: actual xrepl binary shares session; PTY draft survives remote output; EOF/quit only detaches', flush=True)
+                control_session = reconnect.call(op='create')['data']
+                master, slave = pty.openpty()
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 120, 0, 0))
+                def controlling_terminal():
+                    os.setsid()
+                    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+                interactive = subprocess.Popen([binary, '--cayrn', str(state), '--session', control_session['id']], stdin=slave, stdout=slave, stderr=slave, env=dict(os.environ, TERM='xterm-256color'), preexec_fn=controlling_terminal)
+                os.close(slave)
+                try:
+                    screen = collect(.8)
+                    os.write(master, b'(progn (io:format "CTRL-C-START" ()) (timer:sleep 10000) 42)\r')
+                    screen += collect(.8)
+                    assert b'] CTRL-C-START' in screen, screen
+                    os.write(master, b'\x03')
+                    screen += collect(.8)
+                    assert b'Cancelled]' in screen, screen
+                    assert reconnect.call(op='inspect_session', session=control_session['id'])['data']['state'] == 'state_lost'
+                    os.write(master, b':quit\r')
+                    screen += collect(.4)
+                    interactive.wait(timeout=4)
+                    assert interactive.returncode == 0, screen
+                    assert evaluate('cayrn-probe', client=reconnect)[1]['value'] == '43'
+                finally:
+                    stop(interactive)
+                    os.close(master)
+                print('PASS: real PTY Ctrl-C routes session interruption while evaluating; shared peer remains usable', flush=True)
+
+            primary = session
+            def wait_for(predicate, label, seconds=5):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if predicate():
+                        return
+                    time.sleep(.01)
+                raise AssertionError(label)
+            session = reconnect.call(op='create')['data']
+            marker = directory / 'cancel-marker'
+            interrupted = submission('(progn (io:format "INTERRUPT-START" ()) (timer:sleep 1000) (file:write_file "' + str(marker) + '" "bad"))', 'interrupt')
+            reconnect.call(op='submit', submission=interrupted)
+            wait_for(lambda: any(e['event'].get('text') == 'INTERRUPT-START' for e in transcript(reconnect)), 'native evaluation did not start')
+            receipt = reconnect.call(op='cancel', session=session['id'], operation='interrupt')
+            assert receipt['data']['disposition'] == 'interrupt_requested_session_destructive'
+            wait_for(lambda: reconnect.call(op='inspect_session', session=session['id'])['data']['state'] == 'state_lost', 'interrupt state loss not observed')
+            assert reconnect.call(op='inspect_operation', session=session['id'], operation='interrupt')['data']['phase'] == 'cancelled'
+            time.sleep(1.1)
+            assert not marker.exists()
+            assert agent.poll() is None
+            session = primary
+            assert evaluate('cayrn-probe', client=reconnect)[1]['value'] == '43'
+            print('PASS: interruption confirmed after evaluator death, environment discarded, peer session and BEAM survive', flush=True)
+            session = reconnect.call(op='create')['data']
+            archive_id = session['id']
+            closing = submission('(progn (spawn (lambda () (timer:sleep 700) (io:format "AFTER-BARRIER" ()))) (io:format "CLOSE-START" ()) (timer:sleep 3000) 42)', 'close-active')
+            reconnect.call(op='submit', submission=closing)
+            wait_for(lambda: any(e['event'].get('text') == 'CLOSE-START' for e in transcript(reconnect)), 'close evaluation did not start')
+            assert reconnect.call(op='close', session=session['id'])['data']['state'] == 'closing'
+            wait_for(lambda: reconnect.call(op='inspect_session', session=session['id'])['data']['state'] == 'closed', 'native producer/capture barrier incomplete')
+            sealed = transcript(reconnect)
+            assert sealed[-1]['event']['kind'] == 'session_closed'
+            assert reconnect.call(op='inspect_operation', session=session['id'], operation='close-active')['data']['phase'] == 'cancelled'
+            assert reconnect.call(op='close', session=session['id'])['data']['state'] == 'closed'
+            assert reconnect.call(op='submit', submission=submission('42'))['type'] == 'error'
+            time.sleep(.8)
+            assert transcript(reconnect) == sealed
+            session = primary
+            assert evaluate('cayrn-probe', client=reconnect)[1]['value'] == '43'
+            print('PASS: busy close drains/seals managed capture, repeated close is idempotent, archive is immutable and peer survives', flush=True)
+            for boundary in ['output', 'dispatch_intent']:
+                session = reconnect.call(op='create')['data']
+                marker = directory / ('storage-marker-' + boundary)
+                with sqlite3.connect(state / 'journal.sqlite3') as database:
+                    database.execute("CREATE TRIGGER injected_failure BEFORE INSERT ON events WHEN json_extract(NEW.json, '$.event.kind')='" + boundary + "' BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END")
+                failed = submission('(progn (io:format "STORE-BOUNDARY" ()) (file:write_file "' + str(marker) + '" "bad"))', 'store-failure')
+                try:
+                    assert reconnect.call(op='submit', submission=failed)['type'] == 'operation'
+                    wait_for(lambda: reconnect.call(op='inspect_session', session=session['id'])['data']['state'] == 'state_lost', 'storage fault did not freeze dispatch')
+                    phase = reconnect.call(op='inspect_operation', session=session['id'], operation='store-failure')['data']['phase']
+                    assert phase == ('unknown' if boundary == 'output' else 'cancelled'), phase
+                    time.sleep(.1)
+                    assert not marker.exists()
+                    assert reconnect.call(op='submit', submission=failed)['data']['phase'] == phase
+                    assert not any(e['event'].get('text') == 'STORE-BOUNDARY' for e in transcript(reconnect))
+                finally:
+                    with sqlite3.connect(state / 'journal.sqlite3') as database:
+                        database.execute('DROP TRIGGER injected_failure')
+                session = primary
+                assert evaluate('cayrn-probe', client=reconnect)[1]['value'] == '43'
+            print('PASS: injected capture/dispatch transaction failures give no false ACK, post-ACK effect or repeat execution', flush=True)
+            session = reconnect.call(op='create')['data']
+            crashed = submission('(erlang:exit (self) (quote kill))', 'evaluator-crash')
+            assert reconnect.call(op='submit', submission=crashed)['type'] == 'operation'
+            wait_for(lambda: reconnect.call(op='inspect_session', session=session['id'])['data']['state'] == 'state_lost', 'unexpected evaluator death not recorded')
+            assert reconnect.call(op='inspect_operation', session=session['id'], operation='evaluator-crash')['data']['phase'] == 'unknown'
+            session = primary
+            assert evaluate('cayrn-probe', client=reconnect)[1]['value'] == '43'
+            print('PASS: unexpected native evaluator death quarantines one context and preserves peer state', flush=True)
+            uncertain_session = reconnect.call(op='create')['data']
+            session = uncertain_session
+            effect = directory / 'once-effect'
+            uncertain = submission('(progn (file:write_file "' + str(effect) + '" "x" (list (quote append))) (io:format "EFFECT-COMMITTED" ()) (timer:sleep 10000) 42)', 'uncertain')
+            reconnect.call(op='submit', submission=uncertain)
+            wait_for(lambda: any(e['event'].get('text') == 'EFFECT-COMMITTED' for e in transcript(reconnect)), 'pre-crash effect not observed')
+            assert effect.read_text() == 'x'
+            session = primary
             print('PASS: real LFE bindings, two clients, lost reply dedup/conflict, Unicode/errors/input and last-client reconnect', flush=True)
             # Agent connection is separate from public client connections.
-            stop(host, signal.SIGINT)
-            assert host.returncode == 0
+            stop(host, signal.SIGKILL)
+            assert host.returncode == -signal.SIGKILL
             host = host_start()
             restarted = Client(state / 'cayrn.sock')
             assert restarted.call(op='inspect_session', session=session['id'])['data']['state'] == 'state_lost'
             assert restarted.call(op='inspect_operation', session=session['id'], operation='once')['data']['value'] == '42'
             assert transcript(restarted)[:len(before)] == before
             assert agent.poll() is None
+            assert restarted.call(op='inspect_session', session=archive_id)['data']['state'] == 'closed'
+            assert restarted.call(op='inspect_operation', session=uncertain_session['id'], operation='uncertain')['data']['phase'] == 'unknown'
+            assert restarted.call(op='submit', submission=uncertain)['data']['phase'] == 'unknown'
+            assert effect.read_text() == 'x'
             print('PASS: host restart preserves committed transcript, marks old context lost, leaves shared BEAM alive', flush=True)
+            fresh = restarted.call(op='create')['data']
+            doomed = dict(session=fresh['id'], generation=fresh['generation'], operation='agent-crash', client='failure-test', source='(progn (io:format "NODE-CRASH-START" ()) (timer:sleep 10000) 42)')
+            restarted.call(op='submit', submission=doomed)
+            session = fresh
+            wait_for(lambda: any(e['event'].get('text') == 'NODE-CRASH-START' for e in transcript(restarted)), 'agent crash operation did not start')
+            stop(agent, signal.SIGKILL)
+            wait_for(lambda: restarted.call(op='inspect_session', session=fresh['id'])['data']['state'] == 'state_lost', 'agent/node loss did not freeze execution')
+            assert restarted.call(op='inspect_operation', session=fresh['id'], operation='agent-crash')['data']['phase'] == 'unknown'
+            assert restarted.call(op='submit', submission=doomed)['data']['phase'] == 'unknown'
+            assert restarted.call(op='inspect_session', session=archive_id)['data']['state'] == 'closed'
+            print('PASS: whole agent/node failure exposes its shared failure domain without affecting sealed archives or retrying code', flush=True)
             stop(host, signal.SIGINT)
+            assert host.returncode == 0
         except BaseException:
             for log in (agent_log, host_log):
                 log.flush(); log.seek(0); print(log.read()[-4000:])

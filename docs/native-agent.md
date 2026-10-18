@@ -69,3 +69,41 @@ for tools and automated tests. The ordinary default IF mock mode remains intact.
 `make test-xrepl` runs Rust consumer gates and real BEAM/host/headless/PTY cases.
 A headless second client is not a delivered editor plugin. Global terminal UX
 and richer language services remain separate work.
+
+## Interruption and close
+
+Native handshake capabilities declare `interrupt` as `unsupported`, `cooperative`
+or `session_destructive`, and `close_barrier` support. The shared Rust host does
+not infer them from the language name. A non-LFE cooperative contract test proves
+that cancellation can retain a context; LFE currently discards its environment.
+
+```json
+{"op":"cancel","session":"SESSION_ID","operation":"OPERATION_ID"}
+{"op":"close","session":"SESSION_ID"}
+```
+
+Cancel returns a request disposition; inspect the operation/session for actual
+effect. LFE reports cancellation only after monitored evaluator death. A racing
+completed evaluation may remain succeeded. Failed delivery can leave an unknown
+outcome; no automatic retry or external-effect rollback is promised. In xrepl,
+Ctrl-C during evaluation requests interruption; Ctrl-C while editing clears the
+draft. `:close` requests close and detaches, reporting that completion is separate.
+
+Close first commits `closing` and rejects new evaluations. The native agent stops
+its owned foreground evaluator, seals operation I/O servers, and waits for all
+prior capture acknowledgements/seal confirmations. Rust commits `session_closed`
+as the final event only after that barrier and terminal operation dispositions.
+History remains replayable; repeated close is idempotent. Link loss or a five-
+second native barrier timeout leaves close incomplete, not a sealed archive.
+Global devices and unmanaged external activity remain outside the declared
+capture/resource boundary; late writes to sealed group-leader I/O fail explicitly.
+Administrative node termination is separate and can affect every hosted context.
+
+`make check` and `make test-xrepl` cover these paths, including an absent-barrier
+negative control, real keyboard Ctrl-C in a PTY, peer preservation, post-close
+immutability, injected SQLite output/dispatch transaction failures, unexpected
+evaluator death, SIGKILL of the Rust host with the BEAM alive, and whole-agent/node
+loss. These are author-attested local checks. Transaction abort injection does
+not certify disk-full/fsync/power-loss behavior; full T01–T13 remains incomplete.
+No automatic persistent terminal cursor, old-session import, archive deletion,
+remote authentication or package publication is delivered by these checks.
